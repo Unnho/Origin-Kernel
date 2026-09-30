@@ -1061,6 +1061,7 @@ KBUILD_CFLAGS += -Wvla
 
 # disable pointer signed / unsigned warnings in gcc 4.0
 KBUILD_CFLAGS += -Wno-pointer-sign
+KBUILD_CFLAGS += -Wno-error=uninitialized -Wno-error=sometimes-uninitialized -Wno-error=attribute-warning -Wno-error=array-bounds
 
 # In order to make sure new function cast mismatches are not introduced
 # in the kernel (to avoid tripping CFI checking), the kernel should be
