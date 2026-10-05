@@ -121,7 +121,7 @@ Upstream 6.2 writeback series is already backported into this 6.1 base.
 
 ## Defects found during audit
 
-### D1. Duplicate Kconfig symbol — `kernel/power/Kconfig` — ACTIONABLE
+### D1. Duplicate KConfig symbol — `kernel/power/Kconfig` — FIXED
 
 `config WAKELOCK_BLOCKER` is defined **three times** in the same file:
 
@@ -133,7 +133,7 @@ Duplicate symbol definitions in one file are a Kconfig defect and should produce
 a warning during Kconfig parsing. Fix: collapse to a single definition. This is
 low-risk, self-contained, and independent of every other change.
 
-### D2. ZRAM multi-comp read path ignores per-page algorithm — HIGH SEVERITY
+### D2. ZRAM multi-comp read path ignores per-page algorithm — FIXED
 
 `CONFIG_ZRAM_MULTI_COMP` allows a page to be compressed with a **secondary**
 algorithm, but every read path decompresses using the **primary** stream only.
@@ -257,3 +257,79 @@ refactor that landed **after** 6.1 and would have to be forward-ported:
 
 These are recorded as DEFERRED / BLOCKED rather than attempted. Rule 22 applies:
 prefer a smaller correct backport over a large poorly understood forward-port.
+---
+
+## Implemented changes
+
+All changes are on separate branches off `origin-glx`, and are combined on
+`integration/verified-fixes` for build verification.
+
+| # | Branch | Commit subject |
+|---|---|---|
+| D1 | `fix/power-kconfig-duplicate` | `power: remove duplicate WAKELOCK_BLOCKER Kconfig definitions` |
+| D2 | `fix/zram-multi-comp-read-path` | `zram: fix multi-comp read path using wrong decompression algorithm` |
+| 1 | `fix/f2fs-inline-xattr-bounds` | `f2fs: bound i_inline_xattr_size to prevent out-of-bounds inline access` |
+| 2 | `fix/ext4-superblock-guards` | `ext4: do not bump the dynamic revision on a read-only or errored filesystem` |
+| 3 | `fix/sched-rt-dl-push-task` | `sched/rt, sched/dl: reject stale push candidates when revalidating a push` |
+| cfg | `config/user-ns` | `arm64: gki_defconfig: enable CONFIG_USER_NS` |
+
+Diffstat of the combined integration branch: 8 files, 101 insertions, 17 deletions.
+
+### Build verification — PASS (compile only)
+
+| Item | Result |
+|---|---|
+| Config | `make ARCH=arm64 gki_defconfig` OK; `CONFIG_USER_NS=y` confirmed in `.config` |
+| Build | `make ARCH=arm64 -j2 Image` **EXIT=0** |
+| Compiler errors | 0 |
+| Warnings in changed files | 0 (`zram_drv.c`, `f2fs.h`, `inode.c`, `super.c`, `rt.c`, `deadline.c`, `Kconfig`) |
+| `checkpatch.pl` | 0 errors, 0 warnings across all six branches |
+| `git diff --check` | clean |
+| Artifact | `arch/arm64/boot/Image` 34M, valid ARM64 boot executable, 4K pages |
+| vmlinux | 424M, BTF generated |
+| Build string | `Linux version 6.1.177-Origin-v3-00919-g04abf3543c0a ... gcc 14.2.0` |
+
+Runtime testing: **NOT PERFORMED.** No device access, `FLASH_ALLOWED=no`.
+No flashing was attempted. Nothing here is boot-verified.
+
+### Build prerequisite discovered
+
+The tree does not build from a plain clone. `drivers/kernelsu` is a symlink to
+`../KernelSU/kernel`, and `KernelSU` is a git submodule. Until submodules are
+initialised, `drivers/Kconfig:242` fails with
+`can't open file "drivers/kernelsu/Kconfig"` and the kernel cannot be configured.
+
+```
+git submodule update --init --depth 1
+```
+
+This was done locally and is not committed. The tree also ships three submodules:
+`KernelSU`, `susfs4ksu`, `Baseband-guard`.
+
+### Notes on deviations from upstream
+
+- **ext4**: no upstream `ext4_check_dirty_super()` exists to import. The
+  `ext4_update_dynamic_rev()` guard is a local adaptation, not a backport.
+- **sched/rt, sched/dl**: upstream refactors `pick_next_pushable_*_task()` into a
+  `__pick_next_pushable_*_task(rq, may_skip)` helper that dequeues stale entries.
+  That form does not apply here: this tree's generic `dequeue_task()` is a
+  `static inline` local to `kernel/sched/core.c`, unreachable from `rt.c` and
+  `deadline.c`, and the per-class `dequeue_task_rt()`/`dequeue_task_dl()` would
+  skip `sched_core_dequeue()`, `update_rq_clock()`, `psi_dequeue()` and
+  `uclamp_rq_dec()`, under-decrementing uclamp and PSI accounting. The validity
+  check was instead placed directly at the two revalidation sites.
+- **ZRAM**: the read-path fix also had to reset the priority in
+  `zram_free_page()`, because the `WARN_ON_ONCE` at the end of that function
+  already requires all flags other than `ZRAM_LOCK`/`ZRAM_UNDER_WB` to be clear,
+  and `zram_free_page()` never cleared the priority bits.
+
+### Still open
+
+- **D3** (`SCHED_BORE` / `SCHED_CASS` no mutual exclusion) — not fixed. Recorded
+  as WATCH. Fixing it means choosing an exclusivity mechanism, which is a
+  design decision, and enabling BORE was not requested.
+- **ADIOS** and **DAMON** completeness were not audited beyond confirming
+  presence.
+- Android/vendor hooks (memcg PSI skip, migration batch, direct reclaim) not
+  audited.
+- The six DEFERRED backports below remain deferred.
