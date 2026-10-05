@@ -95,6 +95,41 @@ static void zram_set_priority(struct zram *zram, u32 index, u32 prio)
 	zram->table[index].flags &= ~(ZRAM_COMP_PRIORITY_MASK << ZRAM_COMP_PRIORITY_BIT1);
 	zram->table[index].flags |= (prio & ZRAM_COMP_PRIORITY_MASK) << ZRAM_COMP_PRIORITY_BIT1;
 }
+
+/*
+ * Return the compressor that actually produced the object stored at @index.
+ *
+ * Pages are normally compressed with ZRAM_PRIMARY_COMP, but zram_recompress()
+ * can replace a page's object with one produced by a secondary algorithm and
+ * records which one it used in the slot's priority bits.  The read path must
+ * therefore honour those bits instead of assuming the primary stream, otherwise
+ * a recompressed page is handed to the wrong decompressor and fails to inflate.
+ *
+ * Caller must hold the slot lock (zram_slot_lock()) for @index, since the
+ * priority is stored in the same word as the lock's bit_spinlock.
+ *
+ * Falls back to the primary compressor when the recorded algorithm is out of
+ * range or no longer configured, so a corrupted slot cannot be indexed out of
+ * bounds; the resulting inflate failure is then reported by the caller.
+ */
+static struct zcomp *zram_get_comp_for_slot(struct zram *zram, u32 index)
+{
+	u32 prio = zram_get_priority(zram, index);
+	struct zcomp *comp;
+
+	if (prio >= ZRAM_MAX_COMPS)
+		prio = ZRAM_PRIMARY_COMP;
+
+	comp = READ_ONCE(zram->comps[prio]);
+	if (!comp) {
+		if (prio != ZRAM_PRIMARY_COMP)
+			pr_warn_ratelimited("zram %s: slot %u records comp %u which is not configured\n",
+					    zram->disk->disk_name, index, prio);
+		comp = READ_ONCE(zram->comps[ZRAM_PRIMARY_COMP]);
+	}
+
+	return comp;
+}
 #endif
 
 static inline struct zram *dev_to_zram(struct device *dev)
@@ -1261,6 +1296,7 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 			   u32 threshold, u32 prio, u32 prio_max)
 {
 	struct zcomp_strm *zstrm = NULL;
+	struct zcomp *comp;
 	unsigned long handle_old;
 	unsigned long handle_new;
 	unsigned int comp_len_old;
@@ -1288,13 +1324,14 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 		kunmap_atomic(dst);
 		zs_unmap_object(zram->mem_pool, handle_old);
 	} else {
-		zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
+		comp = zram_get_comp_for_slot(zram, index);
+		zstrm = zcomp_stream_get(comp);
 		src = zs_map_object(zram->mem_pool, handle_old, ZS_MM_RO);
 		dst = kmap_atomic(page);
 		ret = zcomp_decompress(zstrm, src, comp_len_old, dst);
 		kunmap_atomic(dst);
 		zs_unmap_object(zram->mem_pool, handle_old);
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(comp);
 		if (ret)
 			return ret;
 	}
@@ -1532,6 +1569,16 @@ static void zram_free_page(struct zram *zram, size_t index)
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	zram->table[index].ac_time = 0;
 #endif
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	/*
+	 * The compression priority only describes the object that is about to be
+	 * released, so it must not survive into the slot's next life.  A fresh
+	 * write always uses ZRAM_PRIMARY_COMP; leaving a stale secondary priority
+	 * here would make the read path pick a decompressor that does not match
+	 * the stored object.  This also keeps the flags assertion below valid.
+	 */
+	zram_set_priority(zram, index, ZRAM_PRIMARY_COMP);
+#endif
 	if (zram_test_flag(zram, index, ZRAM_IDLE))
 		zram_clear_flag(zram, index, ZRAM_IDLE);
 
@@ -1576,6 +1623,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 				struct bio *bio, bool partial_io)
 {
 	struct zcomp_strm *zstrm;
+	struct zcomp *comp = NULL;
 	unsigned long handle;
 	unsigned int size;
 	void *src, *dst;
@@ -1613,8 +1661,10 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 
 	size = zram_get_obj_size(zram, index);
 
-	if (size != PAGE_SIZE)
-		zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
+	if (size != PAGE_SIZE) {
+		comp = zram_get_comp_for_slot(zram, index);
+		zstrm = zcomp_stream_get(comp);
+	}
 
 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
 	if (size == PAGE_SIZE) {
@@ -1626,7 +1676,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 		dst = kmap_atomic(page);
 		ret = zcomp_decompress(zstrm, src, size, dst);
 		kunmap_atomic(dst);
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(comp);
 	}
 	zs_unmap_object(zram->mem_pool, handle);
 	zram_slot_unlock(zram, index);
