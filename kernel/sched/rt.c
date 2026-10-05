@@ -2147,7 +2147,10 @@ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
 			 */
 			if (unlikely(is_migration_disabled(task) ||
 				     !cpumask_test_cpu(lowest_rq->cpu, &task->cpus_mask) ||
-				     task != pick_next_pushable_task(rq))) {
+				     task != pick_next_pushable_task(rq) ||
+				     (!rt_task(task) &&
+				      !task_on_rq_queued(task) &&
+				      !task_on_cpu(rq, task)))) {
 
 				double_unlock_balance(rq, lowest_rq);
 				lowest_rq = NULL;

@@ -1141,6 +1141,21 @@ void ext4_update_dynamic_rev(struct super_block *sb)
 	if (le32_to_cpu(es->s_rev_level) > EXT4_GOOD_OLD_REV)
 		return;
 
+	/*
+	 * The revision bump below is only meaningful if it can be written back.
+	 * On a read-only or error-flagged filesystem the change could never be
+	 * committed, which would leave the in-memory superblock advertising a
+	 * revision and s_inode_size that differ from what is on disk. Since
+	 * s_inode_size governs how every subsequent inode is parsed, that
+	 * inconsistency is not safe to carry, so refuse to bump the revision
+	 * here and let ext4_feature_set_ok() reject the feature instead.
+	 *
+	 * s_mount_state is an unsigned short, so mask it directly rather than
+	 * using test_bit(), which would read a full machine word.
+	 */
+	if (sb_rdonly(sb) || (EXT4_SB(sb)->s_mount_state & EXT4_ERROR_FS))
+		return;
+
 	ext4_warning(sb,
 		     "updating to rev %d because of new feature flag, "
 		     "running e2fsck is recommended",
