@@ -2293,7 +2293,10 @@ static struct rq *find_lock_later_rq(struct task_struct *task, struct rq *rq)
 				       !dl_task(task) ||
 				       !task_on_rq_queued(task))) ||
 				     (!task->dl.dl_throttled &&
-				      task != pick_next_pushable_dl_task(rq)))) {
+				      (task != pick_next_pushable_dl_task(rq) ||
+				       (!dl_task(task) &&
+					!task_on_rq_queued(task) &&
+					!task_on_cpu(rq, task)))))) {
 
 				double_unlock_balance(rq, later_rq);
 				later_rq = NULL;
