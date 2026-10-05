@@ -3482,7 +3482,26 @@ static inline int get_extra_isize(struct inode *inode)
 
 static inline int get_inline_xattr_addrs(struct inode *inode)
 {
-	return F2FS_I(inode)->i_inline_xattr_size;
+	int addrs = F2FS_I(inode)->i_inline_xattr_size;
+	int max_addrs = CUR_ADDRS_PER_INODE(inode) - DEF_INLINE_RESERVED_SIZE;
+
+	/*
+	 * i_inline_xattr_size is subtracted from CUR_ADDRS_PER_INODE by
+	 * MAX_INLINE_DATA() and addrs_per_inode(). If the stored value is out
+	 * of range the difference underflows or becomes huge, and the inline
+	 * data/dentry bounds checks that depend on it turn into out-of-bounds
+	 * accesses against the address pointer area of the inode.
+	 *
+	 * Clamp instead of trusting the field. This is a last line of defence;
+	 * f2fs_read_inode() already refuses to take the on-disk value for an
+	 * inode that does not carry the inline-xattr flag.
+	 */
+	if (addrs < 0)
+		return 0;
+	if (addrs > max_addrs)
+		return max_addrs;
+
+	return addrs;
 }
 
 static inline __le32 *get_dnode_addr(struct inode *inode,
