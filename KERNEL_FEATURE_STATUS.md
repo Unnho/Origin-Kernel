@@ -333,3 +333,78 @@ This was done locally and is not committed. The tree also ships three submodules
 - Android/vendor hooks (memcg PSI skip, migration batch, direct reclaim) not
   audited.
 - The six DEFERRED backports below remain deferred.
+
+---
+
+## CORRECTION: `origin-glx` is not the device build base
+
+An earlier revision of this document treated `origin-glx` as the Tetris build
+base. That is wrong, and the error caused a bootloop.
+
+### Device build topology
+
+The packaged AnyKernel3 zip for Tetris carries the build string
+`6.1.162-Origin-g6411275b06e2`. Commit `6411275b06e2` is reachable **only via
+the tag `Tetris-v1`** — it is on no branch, and it is **not an ancestor of
+`origin-glx`**. The two have diverged.
+
+| Ref | SHA | Kernel | Role |
+|---|---|---|---|
+| `Tetris-v1` (tag) | `cbce87493adf` | 6.1.162 | Released Tetris build |
+| working image source | `6411275b06e2` | 6.1.162 | Ancestor of `Tetris-v1`, 1 commit back |
+| `origin-glx` (branch) | `286c57c1` | 6.1.177 | Development branch |
+
+Distances: `6411275b06e2..origin-glx` = **9,629 commits**,
+`origin-glx..6411275b06e2` = 61. `Tetris-v1` and `6411275b06e2` differ only in
+`README.md` and `main.png`, so they are functionally identical.
+
+Per-device release tags, confirming three separate device lines:
+
+| Device | Codename | Tag | Kernel |
+|---|---|---|---|
+| CMF by Nothing Phone 1 | `Tetris` | `Tetris-v1` | 6.1.162 |
+| CMF by Nothing Phone 2 Pro | `Galaga` | `glx-upstream-2026.03-r20` | 6.1.162 |
+| Nothing Phone (3a) Lite | `Galaxian` | `6.1.172-glx-upstream-2026.06-r9` | 6.1.172 |
+
+### Toolchain requirement
+
+`gki_defconfig` sets `CONFIG_LTO_CLANG_THIN=y`, which requires Clang. The
+released Tetris image was built with **clang 22.1.8 + LLD 22.1.8**.
+
+Building the same defconfig with GCC does **not** fail. Kconfig silently degrades
+to `CONFIG_LTO_NONE=y` because the Clang-ThinLTO options are unavailable, so the
+build reports success while violating its own configuration. This is not
+detectable from the exit status, `checkpatch`, or compiler warnings.
+
+### Which fixes apply to the device base
+
+Tested with `git apply --check` against `6411275b06e2`:
+
+| Fix | Applies? | Reason |
+|---|---|---|
+| f2fs `i_inline_xattr_size` bound | yes | defect present at base |
+| ext4 dynamic-rev guard | yes | defect present at base |
+| `CONFIG_USER_NS` | yes | config change |
+| sched/dl push revalidation | yes | same validity gap at base |
+| sched/rt push revalidation | **no** | 6.1.162 `find_lock_lowest_rq()` already validates `!rt_task()`, `!task_on_rq_queued()` and `task_on_cpu()` directly, with no `pick_next_pushable_task()` comparison |
+| D1 duplicate `CONFIG_WAKELOCK_BLOCKER` | **no** | Boeffla driver absent at base; `kernel/power/` has no such file and `drivers/base/power/wakeup.c` has zero references |
+| D2 ZRAM multi-comp read path | **no** | `ZRAM_MULTI_COMP` has zero references at base; only `ZRAM_WRITEBACK` is present |
+
+### Corrected feature status
+
+Several features reported COMPLETE/PRESENT above describe the `origin-glx`
+development branch and are **absent from the released Tetris kernel**. Re-checking
+at `6411275b06e2`:
+
+| Feature | `origin-glx` | `Tetris-v1` / `6411275b06e2` |
+|---|---|---|
+| Boeffla Wakelock Blocker | PRESENT | **ABSENT** |
+| ZRAM multi-stream / multi-comp | PRESENT | **ABSENT** (only `ZRAM_WRITEBACK`) |
+| ADIOS I/O scheduler | PRESENT, default | **not enabled** |
+| WQ Power Efficiency | upstream | present upstream |
+
+`origin-glx`'s `gki_defconfig` additionally enables
+`CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y`, `CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y` and
+`CONFIG_HZ_300=y`, and drops `CONFIG_RCU_BOOST=y`. Forcing a new default I/O
+scheduler onto flash storage without device testing is a plausible contributor to
+the bootloop, independent of the base mismatch.
